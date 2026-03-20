@@ -19,6 +19,40 @@ Together, these suites cover **130 tasks**, ranging from simple object manipulat
 
 ![An overview of the LIBERO benchmark](https://libero-project.github.io/assets/img/libero/fig1.png)
 
+# Evaluating with LIBERO-PRO
+
+Add this to LeRobot’s pyproject.toml under the extras section: i.e inside optional-dependencies `# Optional dependencies
+[project.optional-dependencies]`
+
+you can find libero and other simulations listed. just add it there.
+
+libero-pro = ["lerobot[transformers-dep]","libero @ git+https://github.com/stepanfeduniak/lerobot-libero-pro.git"]
+
+Then install from your local LeRobot:
+
+pip install -e ".[libero-pro]"
+
+
+to check if its indeed installed - 
+
+python - <<'PY'
+import importlib, importlib.metadata as md, json
+print("module file:", importlib.import_module("libero").__file__)
+print("direct_url.json:", md.distribution("libero").read_text("direct_url.json"))
+PY
+  
+to evaluate using libero-pro - 
+
+```bash
+lerobot-eval \
+  --policy.path=HuggingFaceVLA/smolvla_libero \
+  --env.type=libero \
+  --env.task=libero_object_task \
+  --eval.batch_size=2 \
+  --eval.n_episodes=3
+```
+Surprising - no change in script to run 
+
 ## Evaluating with LIBERO
 
 At **LeRobot**, we ported [LIBERO](https://github.com/Lifelong-Robot-Learning/LIBERO) into our framework and used it mainly to **evaluate [SmolVLA](https://huggingface.co/docs/lerobot/en/smolvla)**, our lightweight Vision-Language-Action model.
@@ -28,17 +62,45 @@ LIBERO is now part of our **multi-eval supported simulation**, meaning you can b
 To Install LIBERO, after following LeRobot official instructions, just do:
 `pip install -e ".[libero]"`
 
+# Ensure your lerobot environment is active
+conda activate lerobot
+
+# Uninstall the potentially conflicting cmake Python package
+pip uninstall cmake
+
+# (Optional) Verify that your system cmake is now discoverable
+which cmake # Should point to /usr/bin/cmake or similar system path
+cmake --version # Should show your system cmake version (e.g., 3.22.1)
+
+# Retry the libero installation
+pip install -e ".[libero]"
+
 ### Single-suite evaluation
 
 Evaluate a policy on one LIBERO suite:
 
+Before this we had to pip install num2words
+
+and
+
+# ```export MUJOCO_GL=egl```
+
 ```bash
 lerobot-eval \
-  --policy.path="your-policy-id" \
+  --policy.path=HuggingFaceVLA/smolvla_libero \
   --env.type=libero \
   --env.task=libero_object \
   --eval.batch_size=2 \
   --eval.n_episodes=3
+```
+
+```bash
+lerobot-eval \
+  --policy.path=HuggingFaceVLA/smolvla_libero \
+  --env.type=libero \
+  --env.task=libero_spatial,libero_object \
+  --eval.batch_size=2 \
+  --eval.n_episodes=250
 ```
 
 - `--env.task` picks the suite (`libero_object`, `libero_spatial`, etc.).
@@ -47,6 +109,12 @@ lerobot-eval \
 - `--eval.n_episodes` sets how many episodes to run in total.
 
 ---
+
+obj -> obj 
+pos -> swap
+sem -> lan
+task -> task
+
 
 ### Multi-suite evaluation
 
@@ -62,6 +130,99 @@ lerobot-eval \
 ```
 
 - Pass a comma-separated list to `--env.task` for multi-suite evaluation.
+
+for running the env perturbations - 
+Edit `evaluation_config.yaml` in `lerobot-libero-pro` so it matches your actual tree:
+
+```yaml
+bddl_files_path: "./libero/libero/bddl_files/"
+script_path: "./notebooks/generate_init_states.py"
+init_file_dir: "./libero/libero/init_files/"
+
+# for env generation:
+use_environment: true
+use_swap: false
+use_object: false
+use_language: false
+use_task: false
+
+ood_task_configs:
+  environment: "./libero_ood/ood_environment.yaml"
+  swap: "./libero_ood/ood_spatial_relation.yaml"
+  object: "./libero_ood/ood_object.yaml"
+  language: "./libero_ood/ood_language.yaml"
+  task: "./libero_ood/ood_task.yaml"
+```
+make the following file - 
+`lerobot-libero-pro/generate_env_temp_suites.py`:
+
+```python
+import yaml
+import os
+
+import perturbation  # from current repo
+
+BASE_CFG_PATH = "evaluation_config.yaml"
+
+BASE_SUITES = [
+    "libero_goal",
+    "libero_spatial",
+    "libero_10",
+    "libero_object",
+]
+
+def main():
+    with open(BASE_CFG_PATH, "r") as f:
+        base_cfg = yaml.safe_load(f)
+
+    for suite in BASE_SUITES:
+        cfg = dict(base_cfg)
+        cfg["task_suite_name"] = suite
+        cfg["bddl_files_path"] = os.path.join(
+            base_cfg["bddl_files_path"].rstrip("/"),
+            suite,
+        )
+        print(f"\n=== Generating env-perturbed TEMP suite for {suite} ===")
+        print(f"BDDL input dir: {cfg['bddl_files_path']}")
+        perturbation.create_env(configs=cfg)
+
+if __name__ == "__main__":
+    main()
+```
+
+Run:
+
+```bash
+cd ~/lerobot/lerobot-libero-pro
+python generate_env_temp_suites.py
+```
+
+If everything is correct, for each of `libero_goal`, `libero_spatial`, `libero_10`, `libero_object` it will:
+
+- Read from: `./libero/libero/bddl_files/<suite>/`
+- Write BDDLs to: `./libero/libero/bddl_files/<suite>_temp/`
+- Write init states to: `./libero/libero/init_files/<suite>_temp/`
+
+rename the _temp to _env and now we have the init and bddl files.
+
+For running evaluations, you now treat these `_env` suites as fixed datasets. So in `evaluation_config.yaml` set all flags to `false`:
+
+```yaml
+use_environment: false
+use_swap: false
+use_object: false
+use_language: false
+use_task: false
+```
+
+This prevents your eval code from trying to regenerate or modify BDDLs during evaluation.
+
+ggs! now run your script - 
+```bash
+ lerobot-eval   --policy.path=HuggingFaceVLA/smolvla_libero   --env.type=libero   --env.task=libero_10_env   --eval.batch_size=2   --eval.n_episodes=3
+ ```
+
+Note: we had to reroute what bddl and init files that libero was seeing in the .libero folder inside home 
 
 ### Control Mode
 
